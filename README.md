@@ -1,11 +1,11 @@
 # MediaScribe
 
-Cloud transcription tool for video/audio files and YouTube URLs. Auto-routes by duration: files under 1 hour go to OpenRouter (Gemini), longer files go to AssemblyAI.
+Cloud transcription tool for video/audio files and YouTube URLs. Auto-routes by duration: files under 1.5 hours go to OpenRouter (Gemini), longer files go to AssemblyAI.
 
 ## Features
 
 - **Local files or YouTube URLs** — pass a file path, folder, or YouTube link
-- **Auto-routing** — short files (<1h) use OpenRouter/Gemini, long files (>=1h) use AssemblyAI
+- **Auto-routing** — short files (<1.5h) use OpenRouter/Gemini, long files (>=1.5h) use AssemblyAI
 - **Library + CLI** — use as an npm package or standalone command
 - **Batch processing** — transcribe entire folders recursively with concurrency control
 - **Dry run** — estimate cost before transcribing
@@ -61,7 +61,7 @@ mediascribe video.mp4 --model google/gemini-2.5-flash
 | `input` | Path to file/folder or YouTube URL | *(required)* |
 | `-o, --output` | Output markdown file (ignored for folders) | `<input>.md` |
 | `--timestamps` | Include timestamps in output | off |
-| `--model` | OpenRouter model (for files <1h) | `google/gemini-3-flash-preview` |
+| `--model` | OpenRouter model (for files <1.5h) | `google/gemini-3-flash-preview` |
 | `--concurrency` | Parallel transcription jobs | `20` |
 | `--dry` | Estimate cost without transcribing | off |
 
@@ -102,7 +102,7 @@ Input → detect type
                                               ↓
                                     ffprobe (get duration)
                                               ↓
-                              ┌─── < 1 hour ──┴── >= 1 hour ───┐
+                              ┌─── < 1.5 hours ──┴── >= 1.5 hours ───┐
                               ↓                                 ↓
                      OpenRouter/Gemini                    AssemblyAI
                   (compress → base64 → API)           (upload → poll)

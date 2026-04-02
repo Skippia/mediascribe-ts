@@ -276,7 +276,7 @@ const program = new Command()
   .argument('<input>', 'Path to file/folder or YouTube URL')
   .option('-o, --output <path>', 'Output markdown file (ignored for folders)')
   .option('--timestamps', 'Include timestamps in output', false)
-  .option('--model <model>', 'OpenRouter model for files <1h', DEFAULT_MODEL)
+  .option('--model <model>', 'OpenRouter model for files <1.5h', DEFAULT_MODEL)
   .option('--concurrency <n>', 'Parallel transcription jobs', (v) => parseInt(v, 10), 20)
   .option('--dry', 'Estimate cost without transcribing', false)
   .action(async (input: string, opts: CliOptions) => {
