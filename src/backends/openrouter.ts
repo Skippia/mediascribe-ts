@@ -52,7 +52,8 @@ function parseResponse(text: string): Paragraph[] {
   try {
     data = JSON.parse(cleaned)
   } catch {
-    throw new Error(`Failed to parse cloud transcription response as JSON`)
+    const preview = cleaned.slice(0, 300)
+    throw new Error(`Failed to parse cloud transcription response as JSON. Raw response: ${preview}`)
   }
 
   return data
