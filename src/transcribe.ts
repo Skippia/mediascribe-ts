@@ -32,7 +32,7 @@ async function transcribeAudioFile(
     throw new Error(`Failed to determine duration: ${audioPath}`)
   }
   const model = options?.cloudModel ?? DEFAULT_MODEL
-  const backend = duration >= DURATION_THRESHOLD ? 'assemblyai' : 'openrouter'
+  const backend = (options?.forceAssemblyai || duration >= DURATION_THRESHOLD) ? 'assemblyai' : 'openrouter'
 
   process.stderr.write(`  Routing to ${backend === 'openrouter' ? 'OpenRouter' : 'AssemblyAI'} (${formatTimestamp(duration)})\n`)
 

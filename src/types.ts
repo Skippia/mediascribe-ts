@@ -3,6 +3,7 @@ export interface TranscribeOptions {
   cloudModel?: string
   openrouterApiKey?: string
   assemblyaiApiKey?: string
+  forceAssemblyai?: boolean
 }
 
 export interface Paragraph {

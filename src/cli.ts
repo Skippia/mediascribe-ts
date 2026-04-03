@@ -19,6 +19,7 @@ interface CliOptions {
   model: string
   concurrency: number
   dry: boolean
+  forceAss: boolean
 }
 
 async function fileExists(path: string): Promise<boolean> {
@@ -75,6 +76,7 @@ async function transcribeOne(
   const result = await transcribe(input, {
     timestamps: options.timestamps,
     cloudModel: options.model,
+    forceAssemblyai: options.forceAss,
   })
 
   await writeFile(outputPath, result.markdown, 'utf-8')
@@ -279,6 +281,7 @@ const program = new Command()
   .option('--model <model>', 'OpenRouter model for files <1.5h', DEFAULT_MODEL)
   .option('--concurrency <n>', 'Parallel transcription jobs', (v) => parseInt(v, 10), 20)
   .option('--dry', 'Estimate cost without transcribing', false)
+  .option('--force-ass', 'Force AssemblyAI for all files regardless of duration', false)
   .action(async (input: string, opts: CliOptions) => {
     if (isYouTubeUrl(input)) {
       await runYouTube(input, opts)
