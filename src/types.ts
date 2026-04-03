@@ -23,7 +23,7 @@ export interface CostEstimate {
   cost: number
 }
 
-export const DURATION_THRESHOLD = 3600 // 1 hour in seconds
+export const DURATION_THRESHOLD = 2400 // 40 minutes in seconds
 export const DEFAULT_MODEL = 'google/gemini-3-flash-preview'
 
 export const SUPPORTED_EXTENSIONS = new Set([
