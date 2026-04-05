@@ -45,15 +45,34 @@ function parseTimestamp(ts: string): number {
 
 function parseResponse(text: string): Paragraph[] {
   let cleaned = text.trim()
-  cleaned = cleaned.replace(/^```(?:json)?\s*/, '')
-  cleaned = cleaned.replace(/\s*```$/, '')
+
+  // Strip code fence (with or without closing fence)
+  const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]+?)(?:\s*```|$)/)
+  if (fenceMatch) {
+    cleaned = fenceMatch[1].trim()
+  } else {
+    const arrayMatch = cleaned.match(/\[[\s\S]*\]/)
+    if (arrayMatch) cleaned = arrayMatch[0]
+  }
 
   let data: Array<{ time?: string; text?: string }>
   try {
     data = JSON.parse(cleaned)
   } catch {
-    const preview = cleaned.slice(0, 300)
-    throw new Error(`Failed to parse cloud transcription response as JSON. Raw response: ${preview}`)
+    // Truncated JSON: close the array after the last complete object and retry
+    const arrayStart = cleaned.indexOf('[')
+    const lastObjectEnd = cleaned.lastIndexOf('}')
+    if (arrayStart !== -1 && lastObjectEnd > arrayStart) {
+      try {
+        data = JSON.parse(cleaned.slice(arrayStart, lastObjectEnd + 1) + ']')
+      } catch {
+        const preview = text.slice(0, 300)
+        throw new Error(`Failed to parse cloud transcription response as JSON. Raw response: ${preview}`)
+      }
+    } else {
+      const preview = text.slice(0, 300)
+      throw new Error(`Failed to parse cloud transcription response as JSON. Raw response: ${preview}`)
+    }
   }
 
   return data

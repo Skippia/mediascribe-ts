@@ -62,8 +62,9 @@ mediascribe video.mp4 --model google/gemini-2.5-flash
 | `-o, --output` | Output markdown file (ignored for folders) | `<input>.md` |
 | `--timestamps` | Include timestamps in output | off |
 | `--model` | OpenRouter model (for files <30m) | `google/gemini-3-flash-preview` |
-| `--concurrency` | Parallel transcription jobs | `20` |
+| `--concurrency` | Parallel transcription jobs | `3` |
 | `--dry` | Estimate cost without transcribing | off |
+| `--force-ass` | Force AssemblyAI for all files regardless of duration | off |
 
 ## Library Usage
 
