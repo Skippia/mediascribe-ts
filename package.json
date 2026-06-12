@@ -12,7 +12,8 @@
     }
   },
   "bin": {
-    "mediascribe": "./dist/cli.js"
+    "mediascribe": "./dist/cli.js",
+    "summary": "./dist/summary-cli.js"
   },
   "scripts": {
     "build": "tsc",

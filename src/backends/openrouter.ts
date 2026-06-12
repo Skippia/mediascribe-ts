@@ -8,6 +8,13 @@ import { compressAudio } from '../audio.js'
 import type { Paragraph } from '../types.js'
 import { DEFAULT_MODEL } from '../types.js'
 
+export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
+
+/** Construct an OpenAI SDK client pointed at OpenRouter. Shared by transcription and summary. */
+export function createOpenRouterClient(apiKey: string, timeoutMs: number): OpenAI {
+  return new OpenAI({ baseURL: OPENROUTER_BASE_URL, apiKey, timeout: timeoutMs })
+}
+
 const AUDIO_TOKEN_RATE = 32 // Gemini: 32 tokens per second of audio
 const MAX_UPLOAD_MB = 100
 const MAX_OUTPUT_TOKENS = 65536
@@ -127,11 +134,7 @@ export async function transcribeOpenRouter(
     process.stderr.write('  Sending to OpenRouter...')
     const t2 = performance.now()
 
-    const client = new OpenAI({
-      baseURL: 'https://openrouter.ai/api/v1',
-      apiKey,
-      timeout: 300_000,
-    })
+    const client = createOpenRouterClient(apiKey, 300_000)
 
     const response = await client.chat.completions.create({
       model,

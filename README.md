@@ -48,6 +48,9 @@ mediascribe ./lectures/
 # Estimate cost
 mediascribe ./lectures/ --dry
 
+# Transcribe folder, then join transcripts into "Raw - *.md" + PDF (via jjoin)
+mediascribe ./lectures/ --jjoin
+
 # Options
 mediascribe video.mp4 -o notes.md --timestamps
 mediascribe ./lectures/ --concurrency 5
@@ -65,6 +68,50 @@ mediascribe video.mp4 --model google/gemini-2.5-flash
 | `--concurrency` | Parallel transcription jobs | `3` |
 | `--dry` | Estimate cost without transcribing | off |
 | `--force-ass` | Force AssemblyAI for all files regardless of duration | off |
+| `--jjoin` | After transcribing a folder, run `jjoin` (md-join.sh) on every folder containing transcripts — produces `Raw - <prefix>.md` per folder (no PDF; `mediascribe` sets `JJOIN_NO_PDF=1`). Skipped if any file failed (rerun to finish). Folder input only. | off |
+| `--summary` | After transcribing and joining, summarize each joined `Raw - *.md` into `Summary - <name>.md` beside it (via `anthropic/claude-opus-4.8`, the same engine as the `summary` command). Implies `--jjoin`. Folder input only. | off |
+| `--no-copy` | Do not copy the result file path(s) to the clipboard. By default, after `--jjoin`/`--summary` the final result path(s) — the `Summary - *.md` when summarizing, otherwise the `Raw - *.md` — are copied to the Wayland clipboard (via `wl-copy`), each quoted and newline-separated. | (copy on) |
+
+```bash
+# Transcribe a course folder, join per subfolder, and summarize each joined file
+mediascribe ./course/ --summary
+```
+
+## `summary` command
+
+A second binary, `summary`, turns a **PDF or Markdown/text file** into a nicely formatted
+Markdown конспект (detailed summary, in Russian) via OpenRouter. It shares this project's
+`.env` (`OPENROUTER_API_KEY`) and build.
+
+Requires **`pdftotext`** (poppler / poppler-utils) for PDF input; `.md`/`.txt` are read directly.
+
+```bash
+# Default: Opus 4.8, writes "Summary - <name>.md" next to the input
+summary lecture.pdf
+summary "Raw - Course.md"
+
+# Cheaper model
+summary notes.md --model google/gemini-3-flash-preview
+
+# Estimate size/cost without calling the API
+summary book.pdf --dry
+
+# Override prompts (literal text, or @path to read from a file)
+summary notes.md --prompt "@/path/to/prompt.txt" --system "@/path/to/system.txt"
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-o, --output` | Output markdown file | `Summary - <name>.md` next to input |
+| `--model` | OpenRouter model slug | `anthropic/claude-opus-4.8` |
+| `--max-tokens` | Max output tokens | `8000` |
+| `--system` | Override system prompt (literal text or `@file`) | faithful-summarizer default |
+| `--prompt` | Override summary prompt (literal text or `@file`) | detailed-конспект default |
+| `--dry` | Show extracted size + cost estimate, no API call | off |
+
+Inputs above ~700K tokens (e.g. large merged `Raw - *.md`) are summarized via **map-reduce**
+(chunk → summarize each → synthesize one конспект) automatically; smaller inputs go in a single
+pass. Existing output files are not overwritten unless `-o` is given.
 
 ## Library Usage
 

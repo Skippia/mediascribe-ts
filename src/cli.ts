@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 
-import { resolve, extname, relative, basename } from 'node:path'
-import { writeFile, readdir, stat, access } from 'node:fs/promises'
+import { resolve, extname, relative, basename, dirname, join } from 'node:path'
+import { writeFile, readdir, stat } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
 import { config } from 'dotenv'
 import { Command } from 'commander'
 import { transcribe, estimateCost } from './transcribe.js'
+import { summarizeFile, buildSummaryDocument } from './summarize.js'
+import { fileExists, copyToClipboard } from './util.js'
 import { hasAudioStream } from './audio.js'
 import { isYouTubeUrl, getYouTubeInfo } from './youtube.js'
 import { formatTimestamp } from './markdown.js'
-import { DEFAULT_MODEL, SUPPORTED_EXTENSIONS } from './types.js'
+import { DEFAULT_MODEL, SUMMARY_DEFAULT_MODEL, SUPPORTED_EXTENSIONS } from './types.js'
 
 // Load .env from script directory
 config({ path: new URL('../.env', import.meta.url).pathname })
@@ -20,15 +23,14 @@ interface CliOptions {
   concurrency: number
   dry: boolean
   forceAss: boolean
+  jjoin: boolean
+  summary: boolean
+  copy: boolean
 }
 
-async function fileExists(path: string): Promise<boolean> {
-  try {
-    await access(path)
-    return true
-  } catch {
-    return false
-  }
+/** Label naming whichever folder-pipeline flags are active, for error/skip messages. */
+function pipelineLabel(options: CliOptions): string {
+  return [options.jjoin && '--jjoin', options.summary && '--summary'].filter(Boolean).join('/')
 }
 
 async function collectFiles(dirPath: string): Promise<string[]> {
@@ -66,6 +68,112 @@ async function filterPendingFiles(files: string[]): Promise<{ pending: string[];
 
 function sanitizeFilename(name: string): string {
   return name.replace(/[\\/*?:"<>|]/g, '').trim().slice(0, 200) || 'transcript'
+}
+
+function runJjoin(dir: string): Promise<void> {
+  return new Promise((res, rej) => {
+    // JJOIN_NO_PDF=1 → md-join.sh produces only the merged .md, no PDF.
+    const child = spawn('jjoin', [dir], {
+      stdio: 'inherit',
+      env: { ...process.env, JJOIN_NO_PDF: '1' },
+    })
+    child.on('error', (err: NodeJS.ErrnoException) => {
+      rej(
+        err.code === 'ENOENT'
+          ? new Error('jjoin not found in PATH (expected ~/.local/bin/jjoin -> md-join.sh)')
+          : err,
+      )
+    })
+    child.on('exit', (code) => {
+      if (code === 0) res()
+      else rej(new Error(`jjoin exited with code ${code} for: ${dir}`))
+    })
+  })
+}
+
+// The "Raw - *.md" file jjoin just wrote in `dir` is the most recently modified one.
+async function findNewestRaw(dir: string): Promise<string | null> {
+  const entries = await readdir(dir)
+  let newest: string | null = null
+  let newestMtime = -Infinity
+  for (const name of entries) {
+    if (!name.startsWith('Raw - ') || !name.endsWith('.md')) continue
+    const path = join(dir, name)
+    const { mtimeMs } = await stat(path)
+    if (mtimeMs > newestMtime) {
+      newestMtime = mtimeMs
+      newest = path
+    }
+  }
+  return newest
+}
+
+// Run jjoin once per directory that holds at least one transcript.
+// jjoin itself is non-recursive (maxdepth 1), so nested course folders
+// each get their own "Raw - *.md" + PDF. Returns the produced Raw file paths.
+async function joinTranscripts(mediaFiles: string[]): Promise<string[]> {
+  const dirs = new Set<string>()
+  for (const f of mediaFiles) {
+    const mdPath = f.replace(extname(f), '.md')
+    if (await fileExists(mdPath)) dirs.add(dirname(mdPath))
+  }
+
+  if (dirs.size === 0) {
+    console.log('  join: no transcripts found to join.')
+    return []
+  }
+
+  console.log(`\n  Joining transcripts in ${dirs.size} folder(s)`)
+  const produced: string[] = []
+  for (const dir of [...dirs].sort()) {
+    await runJjoin(dir)
+    const raw = await findNewestRaw(dir)
+    if (raw) produced.push(raw)
+  }
+  return produced
+}
+
+// Summarize each joined "Raw - *.md" into a "Summary - <name>.md" beside it,
+// using the same engine and default model (Opus 4.8) as the standalone `summary` command.
+// Returns the paths of the summaries actually written (failed ones are skipped).
+async function summarizeRawFiles(rawPaths: string[]): Promise<string[]> {
+  console.log(`\n  Summarizing ${rawPaths.length} joined file(s) with ${SUMMARY_DEFAULT_MODEL}`)
+  const written: string[] = []
+  for (const raw of rawPaths) {
+    const stem = basename(raw, '.md').replace(/^Raw - /, '')
+    const outputPath = join(dirname(raw), `Summary - ${stem}.md`)
+    try {
+      console.log(`\n  ${basename(raw)} → ${basename(outputPath)}`)
+      const result = await summarizeFile(raw)
+      await writeFile(outputPath, buildSummaryDocument(raw, result), 'utf-8')
+      process.stderr.write(`  Saved: ${basename(outputPath)}\n`)
+      written.push(outputPath)
+    } catch (err) {
+      console.error(`  Summary failed: ${basename(raw)} — ${err instanceof Error ? err.message : err}`)
+    }
+  }
+  return written
+}
+
+// Copy the result file path(s) to the clipboard, each quoted, newline-separated —
+// ready to paste straight back into a shell command.
+async function copyResultPaths(paths: string[]): Promise<void> {
+  if (paths.length === 0) return
+  const ok = await copyToClipboard(paths.map((p) => `"${p}"`).join('\n'))
+  if (ok) {
+    const label = paths.length === 1 ? 'path' : `${paths.length} paths`
+    console.log(`  Copied result ${label} to clipboard`)
+  }
+}
+
+// Folder post-processing: join transcripts (if requested), optionally summarize the joined
+// files, then copy the final result path(s) to the clipboard. --summary implies the join step,
+// since the summary is built from the joined file.
+async function postProcess(files: string[], options: CliOptions): Promise<void> {
+  if (!options.jjoin && !options.summary) return
+  const raws = await joinTranscripts(files)
+  const results = options.summary && raws.length > 0 ? await summarizeRawFiles(raws) : raws
+  if (options.copy) await copyResultPaths(results)
 }
 
 async function transcribeOne(
@@ -201,6 +309,10 @@ async function runTranscription(inputPath: string, options: CliOptions): Promise
   const info = await stat(inputPath)
 
   if (info.isFile()) {
+    if (options.jjoin || options.summary) {
+      console.error(`Error: ${pipelineLabel(options)} requires a folder input (nothing to join for a single file)`)
+      process.exit(1)
+    }
     const outputPath = options.output ?? inputPath.replace(extname(inputPath), '.md')
     console.log(`\n  ${basename(inputPath)}`)
     const t = performance.now()
@@ -226,6 +338,7 @@ async function runTranscription(inputPath: string, options: CliOptions): Promise
 
   if (pending.length === 0) {
     console.log('Nothing to do — all files already transcribed.')
+    await postProcess(files, options)
     return
   }
 
@@ -270,6 +383,18 @@ async function runTranscription(inputPath: string, options: CliOptions): Promise
   if (failed) summary.push(`${failed} failed`)
   summary.push(`${total} total`)
   console.log(`   ${summary.join(', ')}`)
+
+  if (options.jjoin || options.summary) {
+    if (failed > 0) {
+      console.error(
+        `\n  ${pipelineLabel(options)} skipped: ${failed} file(s) failed to transcribe — joined output would be incomplete.` +
+          '\n  Re-run the same command; already-done files are skipped automatically.',
+      )
+      process.exitCode = 1
+      return
+    }
+    await postProcess(files, options)
+  }
 }
 
 const program = new Command()
@@ -282,8 +407,23 @@ const program = new Command()
   .option('--concurrency <n>', 'Parallel transcription jobs', (v) => parseInt(v, 10), 3)
   .option('--dry', 'Estimate cost without transcribing', false)
   .option('--force-ass', 'Force AssemblyAI for all files regardless of duration', false)
+  .option(
+    '--jjoin',
+    'After transcribing a folder, join transcripts via jjoin (md-join.sh) into "Raw - *.md" + PDF, one per folder with transcripts',
+    false,
+  )
+  .option(
+    '--summary',
+    `After transcribing and joining, summarize each joined file into "Summary - <name>.md" (via ${SUMMARY_DEFAULT_MODEL}). Implies --jjoin; folder input only`,
+    false,
+  )
+  .option('--no-copy', 'Do not copy the result file path(s) to the clipboard (wl-copy)')
   .action(async (input: string, opts: CliOptions) => {
     if (isYouTubeUrl(input)) {
+      if (opts.jjoin || opts.summary) {
+        console.error(`Error: ${pipelineLabel(opts)} requires a folder input, not a YouTube URL`)
+        process.exit(1)
+      }
       await runYouTube(input, opts)
       return
     }
