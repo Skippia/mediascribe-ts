@@ -1,6 +1,6 @@
 {
   "name": "mediascribe",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Cloud transcription tool — auto-routed: <1h OpenRouter/Gemini, >=1h AssemblyAI",
   "type": "module",
   "main": "./dist/index.js",

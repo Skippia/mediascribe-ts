@@ -36,6 +36,56 @@ interface CliOptions {
   summary: boolean
   copy: boolean
   keep: boolean
+  setKey?: string
+}
+
+/** Absolute path of the .env that dotenv loads at startup (see config() above). */
+const ENV_PATH = new URL('../.env', import.meta.url).pathname
+
+/** Show only the tail of a secret, e.g. "****abcd", so it can be confirmed without leaking. */
+function maskKey(key: string): string {
+  return key.length <= 4 ? '****' : `****${key.slice(-4)}`
+}
+
+/**
+ * Persist ASSEMBLYAI_API_KEY into the .env that the CLI reads on startup.
+ * Replaces an existing assignment in place (preserving every other line and
+ * comment) or appends one if absent. Creates the file if it does not exist.
+ */
+async function setAssemblyAIKey(rawKey: string): Promise<void> {
+  const key = rawKey.trim()
+  if (!key) throw new Error('--set-key requires a non-empty value')
+  if (/[\r\n]/.test(key)) throw new Error('API key must not contain newlines')
+
+  const line = `ASSEMBLYAI_API_KEY=${key}`
+  // Matches `KEY=`, `export KEY=`, with optional surrounding whitespace.
+  const assignment = /^\s*(?:export\s+)?ASSEMBLYAI_API_KEY\s*=/
+
+  let existing = ''
+  if (await fileExists(ENV_PATH)) {
+    existing = await readFile(ENV_PATH, 'utf-8')
+  }
+
+  let next: string
+  if (existing === '') {
+    next = `${line}\n`
+  } else {
+    const lines = existing.split('\n')
+    const idx = lines.findIndex((l) => assignment.test(l))
+    if (idx === -1) {
+      // Append, guaranteeing the new line starts on its own row.
+      const sep = existing.endsWith('\n') ? '' : '\n'
+      next = `${existing}${sep}${line}\n`
+    } else {
+      lines[idx] = line
+      next = lines.join('\n')
+    }
+  }
+
+  await writeFile(ENV_PATH, next, { mode: 0o600 })
+  // Reflect the change in this process too, so a chained run picks it up.
+  process.env.ASSEMBLYAI_API_KEY = key
+  console.log(`✓ Saved ASSEMBLYAI_API_KEY (${maskKey(key)}) to ${ENV_PATH}`)
 }
 
 /** Label naming whichever folder-pipeline flags are active, for error/skip messages. */
@@ -545,10 +595,37 @@ async function runTranscription(inputPath: string, options: CliOptions): Promise
   }
 }
 
+const HELP_OVERVIEW = `
+Commands (this toolkit installs two global binaries):
+  mediascribe <input> [dest]   Transcribe to Markdown via AssemblyAI (see Options above).
+                               input = media file · folder (recursive) · YouTube video URL
+                               · YouTube playlist URL · a .md/.txt listing YouTube links.
+  summary <path>               Summarize a .pdf/.md/.txt (or a folder's joined "Raw - *.md")
+                               into a Markdown конспект via OpenRouter. Run: summary --help
+
+Pipelines:
+  mediascribe ./folder --jjoin     transcribe, then merge per folder  ->  "Raw - *.md"
+  mediascribe ./folder --summary   transcribe -> merge -> summarize   ->  "Summary - *.md"
+  summary ./folder                 summarize a folder's already-joined "Raw - *.md"
+
+Examples:
+  mediascribe lecture.mp4
+  mediascribe "https://youtube.com/watch?v=..."                 # transcript only (audio deleted)
+  mediascribe --keep "https://youtube.com/watch?v=..." ~/talks  # keep the .mp4 in ~/talks
+  mediascribe "https://www.youtube.com/playlist?list=..." --dry
+  mediascribe ./links.md ~/archive
+  summary report.pdf
+
+Requirements:
+  ASSEMBLYAI_API_KEY   required for transcription (mediascribe)
+  OPENROUTER_API_KEY   required for summaries (summary / --summary)
+  yt-dlp + ffmpeg      required for YouTube downloads + audio processing
+`
+
 const program = new Command()
   .name('mediascribe')
-  .description('Transcribe video/audio files to markdown (cloud-based, auto-routed)')
-  .argument('<input>', 'Path to file/folder or YouTube video/playlist URL, or a .md/.txt of links')
+  .description('Transcribe audio/video, YouTube videos, playlists, and link-lists to Markdown (AssemblyAI)')
+  .argument('[input]', 'Path to file/folder or YouTube video/playlist URL, or a .md/.txt of links (omit to show help)')
   .argument('[dest]', 'Output folder for media + transcripts (YouTube/link inputs; default: current dir / auto-named)')
   .option('-o, --output <path>', 'Output markdown file (ignored for folders)')
   .option('--timestamps', 'Include timestamps in output', false)
@@ -567,7 +644,22 @@ const program = new Command()
     false,
   )
   .option('--no-copy', 'Do not copy the result file path(s) to the clipboard (wl-copy)')
-  .action(async (input: string, dest: string | undefined, opts: CliOptions) => {
+  .option('--set-key <key>', 'Save the AssemblyAI API key to .env and exit (overwrites any existing key)')
+  .addHelpText('after', HELP_OVERVIEW)
+  .action(async (input: string | undefined, dest: string | undefined, opts: CliOptions) => {
+    if (opts.setKey !== undefined) {
+      try {
+        await setAssemblyAIKey(opts.setKey)
+      } catch (err) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`)
+        process.exit(1)
+      }
+      return
+    }
+    if (!input || input === 'help') {
+      program.help()
+      return
+    }
     if (isYouTubePlaylistUrl(input)) {
       await runPlaylist(input, opts, dest)
       return

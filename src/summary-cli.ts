@@ -105,10 +105,17 @@ async function runDry(inputPath: string, options: SummaryCliOptions): Promise<vo
   }
 }
 
+const HELP_AFTER = `
+Part of the mediascribe toolkit. For the full overview of commands and flags
+(including transcription), run:  mediascribe --help
+
+Requires OPENROUTER_API_KEY (set in .env or the environment).
+`
+
 const program = new Command()
   .name('summary')
   .description('Summarize a PDF or Markdown file into a nicely formatted Markdown конспект (via OpenRouter)')
-  .argument('<path>', 'Path to a .pdf/.md/.txt file, or a folder (uses its joined "Raw - ...md")')
+  .argument('[path]', 'Path to a .pdf/.md/.txt file, or a folder (uses its joined "Raw - ...md"); omit to show help')
   .option('-o, --output <path>', 'Output markdown file (default: "Summary - <name>.md" next to input)')
   .option('--model <slug>', 'OpenRouter model slug', SUMMARY_DEFAULT_MODEL)
   .option('--max-tokens <n>', 'Max output tokens', (v) => parseInt(v, 10), SUMMARY_MAX_OUTPUT_TOKENS)
@@ -116,7 +123,12 @@ const program = new Command()
   .option('--prompt <text|@file>', 'Override summary prompt (literal text, or @path to read from a file)')
   .option('--dry', 'Show extracted size and cost estimate without calling the API', false)
   .option('--no-copy', 'Do not copy the result to the clipboard (wl-copy)')
-  .action(async (input: string, opts: SummaryCliOptions) => {
+  .addHelpText('after', HELP_AFTER)
+  .action(async (input: string | undefined, opts: SummaryCliOptions) => {
+    if (!input || input === 'help') {
+      program.help()
+      return
+    }
     const rawInput = resolve(input)
     if (!(await fileExists(rawInput))) {
       console.error(`Error: path not found: ${rawInput}`)

@@ -38,6 +38,8 @@ npm link
 
 ## CLI Usage
 
+Run `mediascribe --help` (or just `mediascribe`) for a one-screen overview of both commands (`mediascribe` + `summary`), their flags, and pipelines.
+
 ```bash
 # Single file
 mediascribe video.mp4
