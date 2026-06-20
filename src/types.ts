@@ -1,9 +1,6 @@
 export interface TranscribeOptions {
   timestamps?: boolean
-  cloudModel?: string
-  openrouterApiKey?: string
   assemblyaiApiKey?: string
-  forceAssemblyai?: boolean
 }
 
 export interface Paragraph {
@@ -20,7 +17,6 @@ export interface TranscribeResult {
 
 export interface CostEstimate {
   duration: number
-  backend: 'openrouter' | 'assemblyai'
   cost: number
 }
 

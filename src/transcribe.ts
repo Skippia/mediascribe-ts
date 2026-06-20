@@ -1,59 +1,46 @@
 import { basename } from 'node:path'
 import { getDuration, hasAudioStream } from './audio.js'
-import { transcribeOpenRouter, estimateCostOpenRouter } from './backends/openrouter.js'
 import { transcribeAssemblyAI, estimateCostAssemblyAI } from './backends/assemblyai.js'
 import { isYouTubeUrl, getYouTubeInfo, downloadAudio } from './youtube.js'
 import { buildMarkdown, formatTimestamp } from './markdown.js'
-import {
-  DURATION_THRESHOLD,
-  DEFAULT_MODEL,
-  type TranscribeOptions,
-  type TranscribeResult,
-  type CostEstimate,
-} from './types.js'
+import { type TranscribeOptions, type TranscribeResult, type CostEstimate } from './types.js'
 
-function resolveKeys(options?: TranscribeOptions) {
-  const openrouterApiKey = options?.openrouterApiKey ?? process.env.OPENROUTER_API_KEY
+function resolveKey(options?: TranscribeOptions): string {
   const assemblyaiApiKey = options?.assemblyaiApiKey ?? process.env.ASSEMBLYAI_API_KEY
-  if (!openrouterApiKey || !assemblyaiApiKey) {
-    throw new Error('Both OPENROUTER_API_KEY and ASSEMBLYAI_API_KEY must be set (env or options)')
+  if (!assemblyaiApiKey) {
+    throw new Error('ASSEMBLYAI_API_KEY must be set (env or options)')
   }
-  return { openrouterApiKey, assemblyaiApiKey }
+  return assemblyaiApiKey
 }
 
 async function transcribeAudioFile(
   audioPath: string,
   inputName: string,
-  keys: { openrouterApiKey: string; assemblyaiApiKey: string },
+  assemblyaiApiKey: string,
   options?: TranscribeOptions,
 ): Promise<TranscribeResult> {
   const duration = await getDuration(audioPath)
   if (duration === null) {
     throw new Error(`Failed to determine duration: ${audioPath}`)
   }
-  const model = options?.cloudModel ?? DEFAULT_MODEL
-  const backend = (options?.forceAssemblyai || duration >= DURATION_THRESHOLD) ? 'assemblyai' : 'openrouter'
 
-  process.stderr.write(`  Routing to ${backend === 'openrouter' ? 'OpenRouter' : 'AssemblyAI'} (${formatTimestamp(duration)})\n`)
-
-  const { paragraphs } = backend === 'assemblyai'
-    ? await transcribeAssemblyAI(audioPath, keys.assemblyaiApiKey)
-    : await transcribeOpenRouter(audioPath, keys.openrouterApiKey, { model })
+  process.stderr.write(`  Transcribing with AssemblyAI (${formatTimestamp(duration)})\n`)
+  const { paragraphs } = await transcribeAssemblyAI(audioPath, assemblyaiApiKey)
 
   const markdown = buildMarkdown(inputName, paragraphs, {
     timestamps: options?.timestamps,
     duration,
-    backend,
+    backend: 'assemblyai',
   })
 
-  return { paragraphs, markdown, duration, backend }
+  return { paragraphs, markdown, duration, backend: 'assemblyai' }
 }
 
 export async function transcribe(
   input: string,
   options?: TranscribeOptions,
 ): Promise<TranscribeResult> {
-  const keys = resolveKeys(options)
+  const assemblyaiApiKey = resolveKey(options)
 
   if (isYouTubeUrl(input)) {
     process.stderr.write('  Fetching video info...\n')
@@ -65,7 +52,7 @@ export async function transcribe(
     const { audioPath, cleanup } = await downloadAudio(input)
 
     try {
-      return await transcribeAudioFile(audioPath, info.title, keys, options)
+      return await transcribeAudioFile(audioPath, info.title, assemblyaiApiKey, options)
     } finally {
       await cleanup()
     }
@@ -77,30 +64,26 @@ export async function transcribe(
   }
 
   const inputName = basename(input)
-  return transcribeAudioFile(input, inputName, keys, options)
+  return transcribeAudioFile(input, inputName, assemblyaiApiKey, options)
 }
 
-export async function estimateCost(
-  input: string,
-  options?: Pick<TranscribeOptions, 'cloudModel'>,
-): Promise<CostEstimate> {
+export function estimateCostForDuration(durationSecs: number): CostEstimate {
+  return {
+    duration: durationSecs,
+    cost: estimateCostAssemblyAI(durationSecs),
+  }
+}
+
+export async function estimateCost(input: string): Promise<CostEstimate> {
   let duration: number
 
   if (isYouTubeUrl(input)) {
-    const info = await getYouTubeInfo(input)
-    duration = info.duration
+    duration = (await getYouTubeInfo(input)).duration
   } else {
     const d = await getDuration(input)
     if (d === null) throw new Error(`Failed to determine duration: ${input}`)
     duration = d
   }
 
-  const model = options?.cloudModel ?? DEFAULT_MODEL
-  const backend = duration >= DURATION_THRESHOLD ? 'assemblyai' : 'openrouter'
-  const cost =
-    backend === 'assemblyai'
-      ? estimateCostAssemblyAI(duration)
-      : estimateCostOpenRouter(duration, model)
-
-  return { duration, backend, cost }
+  return estimateCostForDuration(duration)
 }

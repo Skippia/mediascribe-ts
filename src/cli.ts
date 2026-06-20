@@ -1,17 +1,27 @@
 #!/usr/bin/env node
 
 import { resolve, extname, relative, basename, dirname, join } from 'node:path'
-import { writeFile, readdir, stat } from 'node:fs/promises'
+import { writeFile, readFile, readdir, stat, mkdir, unlink } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { config } from 'dotenv'
 import { Command } from 'commander'
-import { transcribe, estimateCost } from './transcribe.js'
+import { transcribe, estimateCost, estimateCostForDuration } from './transcribe.js'
 import { summarizeFile, buildSummaryDocument } from './summarize.js'
 import { fileExists, copyToClipboard } from './util.js'
 import { hasAudioStream } from './audio.js'
-import { isYouTubeUrl, getYouTubeInfo } from './youtube.js'
+import {
+  isYouTubeUrl,
+  getYouTubeInfo,
+  isYouTubePlaylistUrl,
+  getPlaylistInfo,
+  downloadVideo,
+  downloadPlaylist,
+  extractYouTubeUrls,
+  downloadVideoInto,
+  downloadPlaylistInto,
+} from './youtube.js'
 import { formatTimestamp } from './markdown.js'
-import { DEFAULT_MODEL, SUMMARY_DEFAULT_MODEL, SUPPORTED_EXTENSIONS } from './types.js'
+import { SUMMARY_DEFAULT_MODEL, SUPPORTED_EXTENSIONS } from './types.js'
 
 // Load .env from script directory
 config({ path: new URL('../.env', import.meta.url).pathname })
@@ -19,13 +29,13 @@ config({ path: new URL('../.env', import.meta.url).pathname })
 interface CliOptions {
   output?: string
   timestamps: boolean
-  model: string
   concurrency: number
   dry: boolean
   forceAss: boolean
   jjoin: boolean
   summary: boolean
   copy: boolean
+  keep: boolean
 }
 
 /** Label naming whichever folder-pipeline flags are active, for error/skip messages. */
@@ -68,6 +78,25 @@ async function filterPendingFiles(files: string[]): Promise<{ pending: string[];
 
 function sanitizeFilename(name: string): string {
   return name.replace(/[\\/*?:"<>|]/g, '').trim().slice(0, 200) || 'transcript'
+}
+
+// Print a "known duration + estimated cost" summary for a set of (possibly unknown) durations.
+// Shared by the --dry paths of runPlaylist and runLinkFile.
+function printDurationCostEstimate(durations: Array<number | null>): void {
+  let cost = 0
+  let knownDuration = 0
+  let unknown = 0
+  for (const d of durations) {
+    if (d == null) {
+      unknown++
+      continue
+    }
+    knownDuration += d
+    cost += estimateCostForDuration(d).cost
+  }
+  console.log(`   Known duration: ${formatTimestamp(knownDuration)} (${(knownDuration / 60).toFixed(1)} min)`)
+  if (unknown) console.log(`   ${unknown} item(s) with unknown duration (excluded from estimate)`)
+  console.log(`   Estimated cost (AssemblyAI): ~$${cost.toFixed(2)}`)
 }
 
 function runJjoin(dir: string): Promise<void> {
@@ -183,33 +212,168 @@ async function transcribeOne(
 ): Promise<void> {
   const result = await transcribe(input, {
     timestamps: options.timestamps,
-    cloudModel: options.model,
-    forceAssemblyai: options.forceAss,
   })
 
   await writeFile(outputPath, result.markdown, 'utf-8')
   process.stderr.write(`  Saved: ${basename(outputPath)}\n`)
 }
 
-async function runYouTube(url: string, options: CliOptions): Promise<void> {
+// Delete the downloaded media files in a tree (transcripts and joined output are kept).
+// Used when --keep is off, so a run leaves only the transcripts behind.
+async function deleteMediaFiles(dir: string, keepExisting: Set<string>): Promise<void> {
+  const files = (await collectFiles(dir)).filter((f) => !keepExisting.has(f))
+  let removed = 0
+  for (const f of files) {
+    try {
+      await unlink(f)
+      removed++
+    } catch {
+      // best-effort cleanup
+    }
+  }
+  if (removed) console.log(`  Removed ${removed} downloaded media file(s) — pass --keep to preserve`)
+}
+
+// Transcribe everything in `dir`, then (unless --keep) delete only the media THIS run downloaded —
+// leaving transcripts and any media that already lived in a reused dest folder untouched.
+async function transcribeAndClean(dir: string, options: CliOptions, preexisting: Set<string>): Promise<void> {
+  await runTranscription(dir, options)
+  if (!options.keep) await deleteMediaFiles(dir, preexisting)
+}
+
+async function runYouTube(url: string, options: CliOptions, dest?: string): Promise<void> {
   if (options.dry) {
     process.stderr.write('  Fetching video info...\n')
     const info = await getYouTubeInfo(url)
-    const est = await estimateCost(url, { cloudModel: options.model })
+    const est = await estimateCost(url)
     console.log(`\n  YouTube: ${info.title}`)
     console.log(`   Duration: ${formatTimestamp(info.duration)}`)
-    console.log(`   Backend:  ${est.backend === 'assemblyai' ? 'AssemblyAI' : 'OpenRouter'}`)
-    console.log(`   Cost:     ~$${est.cost.toFixed(2)}`)
+    console.log(`   Cost (AssemblyAI): ~$${est.cost.toFixed(2)}`)
     return
   }
 
-  const outputPath = options.output ?? sanitizeFilename((await getYouTubeInfo(url)).title) + '.md'
-  console.log(`\n  YouTube → ${basename(outputPath)}`)
+  process.stderr.write('  Fetching video info...\n')
+  const info = await getYouTubeInfo(url)
+  const baseDir = dest ? resolve(dest) : null
+  if (baseDir) await mkdir(baseDir, { recursive: true })
+  const outDir = baseDir ?? process.cwd()
+  // With a dest folder, output is title-named inside it; otherwise honor -o, else title in cwd.
+  const explicitOut = baseDir ? undefined : options.output
+  const stem = explicitOut ? explicitOut.replace(/\.md$/i, '') : sanitizeFilename(info.title)
+  const outputPath = explicitOut ?? join(outDir, `${stem}.md`)
+
+  console.log(`\n  YouTube: ${info.title}`)
   const t = performance.now()
-  await transcribeOne(url, outputPath, options)
+  // --keep: download the full video and transcribe from it (preserved).
+  // Default: audio-only transient — transcribe() downloads audio, transcribes, then deletes it.
+  let videoPath: string | null = null
+  if (options.keep) {
+    console.log(`  Downloading video → ${stem}.mp4`)
+    videoPath = await downloadVideo(url, join(outDir, stem))
+  }
+  await transcribeOne(videoPath ?? url, outputPath, options)
   const elapsed = (performance.now() - t) / 1000
   console.log(`\n${'─'.repeat(50)}`)
+  if (videoPath) console.log(`  Video:      ${videoPath}`)
+  console.log(`  Transcript: ${outputPath}`)
   console.log(`Done in ${formatTimestamp(elapsed)}`)
+}
+
+async function runPlaylist(url: string, options: CliOptions, dest?: string): Promise<void> {
+  process.stderr.write('  Fetching playlist info...\n')
+  const info = await getPlaylistInfo(url)
+  const count = info.entries.length
+  console.log(`\n  Playlist: ${info.title} (${count} video${count === 1 ? '' : 's'})`)
+
+  if (count === 0) {
+    console.error('  No videos found in playlist.')
+    process.exit(1)
+  }
+
+  if (options.dry) {
+    printDurationCostEstimate(info.entries.map((e) => e.duration))
+    return
+  }
+
+  const dir = dest ? resolve(dest) : resolve(sanitizeFilename(info.title))
+  await mkdir(dir, { recursive: true })
+  const preexisting = new Set(await collectFiles(dir))
+  console.log(`  Downloading ${count} item(s) (${options.keep ? 'video' : 'audio'}) → ${dir}`)
+  try {
+    await downloadPlaylist(url, dir, options.keep)
+  } catch (err) {
+    // Private/unavailable videos make yt-dlp exit non-zero even when the rest downloaded fine.
+    // Don't abort the run — transcribe whatever landed.
+    console.error(
+      `  Some items could not be downloaded (private/unavailable); transcribing the rest. (${err instanceof Error ? err.message : err})`,
+    )
+  }
+  // Transcribe (--concurrency, skip-already-done, --jjoin/--summary), then drop this run's downloads unless --keep.
+  await transcribeAndClean(dir, options, preexisting)
+}
+
+// Input is a .md/.txt file listing YouTube links: extract them, download each (video → file,
+// playlist → subfolder) into a "<file stem>/" folder, then transcribe the whole tree.
+async function runLinkFile(filePath: string, options: CliOptions, dest?: string): Promise<void> {
+  const text = await readFile(filePath, 'utf-8')
+  const urls = extractYouTubeUrls(text)
+  if (urls.length === 0) {
+    console.error(`  No YouTube links found in ${basename(filePath)}`)
+    process.exit(1)
+  }
+
+  const playlists: string[] = []
+  const videos: string[] = []
+  for (const u of urls) (isYouTubePlaylistUrl(u) ? playlists : videos).push(u)
+  console.log(
+    `\n  ${basename(filePath)}: ${urls.length} link(s) — ${videos.length} video(s), ${playlists.length} playlist(s)`,
+  )
+
+  if (options.dry) {
+    const durations: Array<number | null> = []
+    for (const u of videos) {
+      try {
+        durations.push((await getYouTubeInfo(u)).duration)
+      } catch {
+        durations.push(null)
+      }
+    }
+    for (const u of playlists) {
+      try {
+        for (const e of (await getPlaylistInfo(u)).entries) durations.push(e.duration)
+      } catch {
+        durations.push(null)
+      }
+    }
+    printDurationCostEstimate(durations)
+    return
+  }
+
+  const dir = dest ? resolve(dest) : resolve(sanitizeFilename(basename(filePath, extname(filePath))))
+  await mkdir(dir, { recursive: true })
+  const preexisting = new Set(await collectFiles(dir))
+  console.log(`  Output folder: ${dir} (${options.keep ? 'video' : 'audio'})`)
+
+  let dlFailed = 0
+  const groups = [
+    { label: 'video', urls: videos, download: downloadVideoInto },
+    { label: 'playlist', urls: playlists, download: downloadPlaylistInto },
+  ]
+  for (const group of groups) {
+    for (let i = 0; i < group.urls.length; i++) {
+      console.log(`\n  [${group.label} ${i + 1}/${group.urls.length}] ${group.urls[i]}`)
+      try {
+        await group.download(group.urls[i], dir, options.keep)
+      } catch (err) {
+        dlFailed++
+        console.error(`  Download failed: ${group.urls[i]} — ${err instanceof Error ? err.message : err}`)
+      }
+    }
+  }
+  if (dlFailed) console.error(`\n  ${dlFailed} download(s) failed; transcribing what was downloaded.`)
+
+  // Transcribe the whole downloaded tree (recursive), then drop this run's downloads unless --keep.
+  await transcribeAndClean(dir, options, preexisting)
 }
 
 async function runDryEstimate(inputPath: string, options: CliOptions): Promise<void> {
@@ -253,10 +417,10 @@ async function runDryEstimate(inputPath: string, options: CliOptions): Promise<v
     return
   }
 
-  const estimates: Array<{ file: string; duration: number; backend: string; cost: number }> = []
+  const estimates: Array<{ file: string; duration: number; cost: number }> = []
   for (const f of pending) {
     try {
-      const est = await estimateCost(f, { cloudModel: options.model })
+      const est = await estimateCost(f)
       estimates.push({ file: f, ...est })
     } catch {
       console.error(`   Warning: could not determine duration for ${basename(f)}, skipping`)
@@ -273,36 +437,20 @@ async function runDryEstimate(inputPath: string, options: CliOptions): Promise<v
     ...estimates.map((e) => (info.isDirectory() ? relative(base, e.file) : basename(e.file)).length),
   )
 
-  console.log(`   ${'File'.padEnd(nameWidth)}  ${'Duration'.padEnd(10)}  Backend`)
+  console.log(`   ${'File'.padEnd(nameWidth)}  Duration`)
 
-  let openrouterCost = 0
-  let assemblyaiCost = 0
-  let openrouterDuration = 0
-  let assemblyaiDuration = 0
-
+  let totalDuration = 0
+  let totalCost = 0
   for (const est of estimates) {
     const name = info.isDirectory() ? relative(base, est.file) : basename(est.file)
-    const label = est.backend === 'assemblyai' ? 'AssemblyAI' : 'OpenRouter'
-    console.log(`   ${name.padEnd(nameWidth)}  ${formatTimestamp(est.duration).padEnd(10)}  ${label}`)
-    if (est.backend === 'assemblyai') {
-      assemblyaiCost += est.cost
-      assemblyaiDuration += est.duration
-    } else {
-      openrouterCost += est.cost
-      openrouterDuration += est.duration
-    }
+    console.log(`   ${name.padEnd(nameWidth)}  ${formatTimestamp(est.duration)}`)
+    totalDuration += est.duration
+    totalCost += est.cost
   }
 
-  const totalDuration = openrouterDuration + assemblyaiDuration
-  const totalCost = openrouterCost + assemblyaiCost
-
-  console.log(`   ${'─'.repeat(nameWidth + 24)}`)
+  console.log(`   ${'─'.repeat(nameWidth + 12)}`)
   console.log(`   ${'Total duration:'.padEnd(nameWidth + 2)} ${formatTimestamp(totalDuration)} (${(totalDuration / 60).toFixed(1)} min)`)
-  if (openrouterDuration > 0)
-    console.log(`   ${'OpenRouter:'.padEnd(nameWidth + 2)} ${formatTimestamp(openrouterDuration)} — ~$${openrouterCost.toFixed(2)} (${options.model})`)
-  if (assemblyaiDuration > 0)
-    console.log(`   ${'AssemblyAI:'.padEnd(nameWidth + 2)} ${formatTimestamp(assemblyaiDuration)} — ~$${assemblyaiCost.toFixed(2)}`)
-  console.log(`   ${'Total cost:'.padEnd(nameWidth + 2)} ~$${totalCost.toFixed(2)}`)
+  console.log(`   ${'Total cost (AssemblyAI):'.padEnd(nameWidth + 2)} ~$${totalCost.toFixed(2)}`)
 }
 
 async function runTranscription(inputPath: string, options: CliOptions): Promise<void> {
@@ -400,13 +548,14 @@ async function runTranscription(inputPath: string, options: CliOptions): Promise
 const program = new Command()
   .name('mediascribe')
   .description('Transcribe video/audio files to markdown (cloud-based, auto-routed)')
-  .argument('<input>', 'Path to file/folder or YouTube URL')
+  .argument('<input>', 'Path to file/folder or YouTube video/playlist URL, or a .md/.txt of links')
+  .argument('[dest]', 'Output folder for media + transcripts (YouTube/link inputs; default: current dir / auto-named)')
   .option('-o, --output <path>', 'Output markdown file (ignored for folders)')
   .option('--timestamps', 'Include timestamps in output', false)
-  .option('--model <model>', 'OpenRouter model for files <30m', DEFAULT_MODEL)
   .option('--concurrency <n>', 'Parallel transcription jobs', (v) => parseInt(v, 10), 3)
   .option('--dry', 'Estimate cost without transcribing', false)
-  .option('--force-ass', 'Force AssemblyAI for all files regardless of duration', false)
+  .option('--force-ass', '(deprecated, no-op) AssemblyAI is always used now', false)
+  .option('--keep', 'Keep the downloaded video(s) after transcribing (default: audio-only, deleted)', false)
   .option(
     '--jjoin',
     'After transcribing a folder, join transcripts via jjoin (md-join.sh) into "Raw - *.md" + PDF, one per folder with transcripts',
@@ -418,13 +567,20 @@ const program = new Command()
     false,
   )
   .option('--no-copy', 'Do not copy the result file path(s) to the clipboard (wl-copy)')
-  .action(async (input: string, opts: CliOptions) => {
+  .action(async (input: string, dest: string | undefined, opts: CliOptions) => {
+    if (isYouTubePlaylistUrl(input)) {
+      await runPlaylist(input, opts, dest)
+      return
+    }
+
     if (isYouTubeUrl(input)) {
       if (opts.jjoin || opts.summary) {
-        console.error(`Error: ${pipelineLabel(opts)} requires a folder input, not a YouTube URL`)
+        console.error(
+          `Error: ${pipelineLabel(opts)} requires a folder or playlist URL, not a single video`,
+        )
         process.exit(1)
       }
-      await runYouTube(input, opts)
+      await runYouTube(input, opts, dest)
       return
     }
 
@@ -433,6 +589,18 @@ const program = new Command()
     if (!(await fileExists(inputPath))) {
       console.error(`Error: path not found: ${inputPath}`)
       process.exit(1)
+    }
+
+    // A .md/.txt file is a list of links to download + transcribe (not a media file).
+    const ext = extname(inputPath).toLowerCase()
+    if ((ext === '.md' || ext === '.txt') && (await stat(inputPath)).isFile()) {
+      await runLinkFile(inputPath, opts, dest)
+      return
+    }
+
+    // Local file/folder: transcripts are written beside their sources, so a dest folder doesn't apply.
+    if (dest) {
+      console.error('  Note: a destination folder is ignored for local files/folders (transcripts go beside the media).')
     }
 
     if (opts.dry) {

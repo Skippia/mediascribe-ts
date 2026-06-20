@@ -1,11 +1,14 @@
 # MediaScribe
 
-Cloud transcription tool for video/audio files and YouTube URLs. Auto-routes by duration: files under 30 minutes go to OpenRouter (Gemini), longer files go to AssemblyAI.
+Cloud transcription tool for video/audio files, YouTube videos, and YouTube playlists. Transcription always runs through AssemblyAI. By default YouTube/playlist/link inputs are fetched as audio, transcribed, and discarded — only the transcript remains. Pass `--keep` to download and preserve the full `.mp4`, and an optional trailing folder to choose where output lands.
 
 ## Features
 
-- **Local files or YouTube URLs** — pass a file path, folder, or YouTube link
-- **Auto-routing** — short files (<30m) use OpenRouter/Gemini, long files (>=30m) use AssemblyAI
+- **Local files, YouTube videos & playlists** — pass a file path, folder, YouTube video link, or playlist link
+- **Transient by default** — YouTube/playlist/link media is fetched as audio-only, transcribed, then deleted; only the transcript is left. Pass `--keep` to download the full video (`.mp4`) and preserve it.
+- **Link-list files** — pass a `.md`/`.txt` containing YouTube links; every link is transcribed (videos as files, playlists as subfolders)
+- **Destination folder** — an optional trailing folder path sets where media/transcripts go (default: current dir, or an auto-named folder for a playlist / link-list)
+- **AssemblyAI transcription** — all transcription runs through AssemblyAI (`ASSEMBLYAI_API_KEY`)
 - **Library + CLI** — use as an npm package or standalone command
 - **Batch processing** — transcribe entire folders recursively with concurrency control
 - **Dry run** — estimate cost before transcribing
@@ -26,8 +29,8 @@ npm install
 npm run build
 
 # Set API keys in .env
-echo 'OPENROUTER_API_KEY=sk-or-v1-...' >> .env
-echo 'ASSEMBLYAI_API_KEY=...' >> .env
+echo 'ASSEMBLYAI_API_KEY=...' >> .env            # required (transcription)
+echo 'OPENROUTER_API_KEY=sk-or-v1-...' >> .env   # only for the `summary` command / --summary
 
 # Make globally available
 npm link
@@ -39,8 +42,23 @@ npm link
 # Single file
 mediascribe video.mp4
 
-# YouTube URL
+# YouTube video — transcribe only (audio fetched, transcribed, then deleted)
 mediascribe "https://youtube.com/watch?v=..."
+
+# Keep the downloaded video too ("<title>.mp4" + "<title>.md" in the current dir)
+mediascribe --keep "https://youtube.com/watch?v=..."
+
+# Send output to a specific folder (trailing path; works with or without --keep)
+mediascribe --keep "https://youtube.com/watch?v=..." ~/videos/talks
+
+# YouTube playlist — transcribe every video; --dry first to see count + cost
+mediascribe "https://www.youtube.com/playlist?list=..." --dry
+mediascribe --keep "https://www.youtube.com/playlist?list=..." ~/podcasts/series
+
+# Link-list file — extract every YouTube link, transcribe all
+mediascribe ./links.md
+mediascribe ./links.md --dry                 # count links + estimate cost first
+mediascribe --keep ./links.md ~/archive      # keep videos, output into ~/archive
 
 # Folder (recursive)
 mediascribe ./lectures/
@@ -54,20 +72,20 @@ mediascribe ./lectures/ --jjoin
 # Options
 mediascribe video.mp4 -o notes.md --timestamps
 mediascribe ./lectures/ --concurrency 5
-mediascribe video.mp4 --model google/gemini-2.5-flash
 ```
 
 ### CLI Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `input` | Path to file/folder or YouTube URL | *(required)* |
+| `input` | Path to file/folder, YouTube video/playlist URL, or a `.md`/`.txt` of links | *(required)* |
+| `dest` | Output folder for media + transcripts (YouTube/link inputs) | current dir / auto-named |
 | `-o, --output` | Output markdown file (ignored for folders) | `<input>.md` |
 | `--timestamps` | Include timestamps in output | off |
-| `--model` | OpenRouter model (for files <30m) | `google/gemini-3-flash-preview` |
+| `--keep` | Keep the downloaded video(s) after transcribing | off (audio-only, deleted) |
 | `--concurrency` | Parallel transcription jobs | `3` |
 | `--dry` | Estimate cost without transcribing | off |
-| `--force-ass` | Force AssemblyAI for all files regardless of duration | off |
+| `--force-ass` | (deprecated, no-op) AssemblyAI is always used | off |
 | `--jjoin` | After transcribing a folder, run `jjoin` (md-join.sh) on every folder containing transcripts — produces `Raw - <prefix>.md` per folder (no PDF; `mediascribe` sets `JJOIN_NO_PDF=1`). Skipped if any file failed (rerun to finish). Folder input only. | off |
 | `--summary` | After transcribing and joining, summarize each joined `Raw - *.md` into `Summary - <name>.md` beside it (via `anthropic/claude-opus-4.8`, the same engine as the `summary` command). Implies `--jjoin`. Folder input only. | off |
 | `--no-copy` | Do not copy the result file path(s) to the clipboard. By default, after `--jjoin`/`--summary` the final result path(s) — the `Summary - *.md` when summarizing, otherwise the `Raw - *.md` — are copied to the Wayland clipboard (via `wl-copy`), each quoted and newline-separated. | (copy on) |
@@ -150,12 +168,10 @@ Input → detect type
                                               ↓
                                     ffprobe (get duration)
                                               ↓
-                              ┌─── < 30 minutes ──┴── >= 30 minutes ───┐
-                              ↓                                 ↓
-                     OpenRouter/Gemini                    AssemblyAI
-                  (compress → base64 → API)           (upload → poll)
-                              ↓                                 ↓
-                              └────────── Markdown ────────────┘
+                                       AssemblyAI
+                                 (compress → upload → poll)
+                                              ↓
+                                         Markdown
 ```
 
 ## File Structure
@@ -166,8 +182,8 @@ src/
 ├── cli.ts                # CLI (commander)
 ├── transcribe.ts         # Routing + orchestration
 ├── backends/
-│   ├── openrouter.ts     # OpenRouter/Gemini (<30m)
-│   └── assemblyai.ts     # AssemblyAI (>=30m)
+│   ├── openrouter.ts     # OpenRouter client (used by the summary command)
+│   └── assemblyai.ts     # AssemblyAI (transcription)
 ├── audio.ts              # ffprobe/ffmpeg utilities
 ├── markdown.ts           # Markdown formatting
 ├── youtube.ts            # yt-dlp integration
